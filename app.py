@@ -18,11 +18,13 @@ app = FastAPI()
 # ------------------------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://app-y529sf.example.com",
-        "https://exam.sanand.workers.dev",
-        "https://tools-in-data-science.pages.dev",
-    ],
+   allow_origins=[
+    "https://app-y529sf.example.com",
+    "https://exam.sanand.workers.dev",
+    "https://tools-in-data-science.pages.dev",
+    "https://sanand.workers.dev",
+    "https://tds.s-anand.net",
+],
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
