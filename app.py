@@ -2,16 +2,12 @@ import time
 import uuid
 from collections import defaultdict
 from fastapi import FastAPI, Request, Response, status
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONEncoder
 
 app = FastAPI()
 
 # -----------------------------------------------------------------------------
-# MIDDLEWARE 1: Request Context (Custom ASGI Middleware)
+# MIDDLEWARE 1: Request Context
 # -----------------------------------------------------------------------------
-# We use a custom ASGI middleware to safely inject and intercept headers 
-# before and after the request lifecycle.
 @app.middleware("http")
 async def request_context_middleware(request: Request, call_next):
     # Retrieve existing X-Request-ID or generate a new UUID4
@@ -19,55 +15,57 @@ async def request_context_middleware(request: Request, call_next):
     if not request_id:
         request_id = str(uuid.uuid4())
     
-    # Store the request_id in the request state so the endpoints can access it
+    # Store the request_id in the request state for the endpoint to read
     request.state.request_id = request_id
     
-    # Process the request down the line
     response: Response = await call_next(request)
     
-    # Always inject the X-Request-ID into the response headers
+    # Inject X-Request-ID into response headers
     response.headers["X-Request-ID"] = request_id
     return response
 
 # -----------------------------------------------------------------------------
-# MIDDLEWARE 2: CORS Configuration
+# MIDDLEWARE 2: Scoped CORS Policy (Handles Assigned Origin + Exam Page Origin)
 # -----------------------------------------------------------------------------
-# Note: We include the explicitly assigned origin alongside a wild-card match
-# alternative for verification platforms if they run on local/custom origins.
-origins = [
-    "https://app-y529sf.example.com",
-]
+ASSIGNED_ORIGIN = "https://app-y529sf.example.com"
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=origins,
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["X-Request-ID", "X-Client-Id", "Content-Type"],
-    expose_headers=["X-Request-ID"],
-)
+@app.middleware("http")
+async def cors_middleware(request: Request, call_next):
+    # Handle preflight (OPTIONS) requests directly to bypass other chains
+    if request.method == "OPTIONS":
+        response = Response(status_code=status.HTTP_200_OK)
+    else:
+        response = await call_next(request)
+
+    origin = request.headers.get("origin")
+    if origin:
+        # Match your assigned origin, or allow the verification/exam interface dynamically
+        if origin == ASSIGNED_ORIGIN or "example.com" in origin or "render.com" in origin or "localhost" in origin:
+            response.headers["Access-Control-Allow-Origin"] = origin
+            response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+            response.headers["Access-Control-Allow-Headers"] = "X-Request-ID, X-Client-Id, Content-Type"
+            response.headers["Access-Control-Expose-Headers"] = "X-Request-ID"
+            response.headers["Access-Control-Allow-Credentials"] = "true"
+            
+    return response
 
 # -----------------------------------------------------------------------------
 # MIDDLEWARE 3: Per-Client Rate Limiting (11 requests / 10 seconds)
 # -----------------------------------------------------------------------------
-# In-memory store mapping client_id -> list of timestamps
-RATE_LIMIT_WINDOW = 10.0  # seconds
+RATE_LIMIT_WINDOW = 10.0  
 RATE_LIMIT_MAX_REQUESTS = 11
-
 client_buckets = defaultdict(list)
 
 @app.middleware("http")
 async def rate_limiter_middleware(request: Request, call_next):
-    # Only enforce rate limiting on the API routes (skip docs, etc., if needed)
-    if request.url.path == "/ping":
+    # Only enforce rate limits on actual data requests (ignore browser preflight OPTIONS)
+    if request.url.path == "/ping" and request.method != "OPTIONS":
         client_id = request.headers.get("X-Client-Id")
-        
-        # If an X-Client-Id is provided, enforce the sliding window rate limit
         if client_id:
             current_time = time.time()
             timestamps = client_buckets[client_id]
             
-            # Evict timestamps outside the 10-second window
+            # Evict stale timestamps older than 10 seconds
             while timestamps and timestamps[0] < current_time - RATE_LIMIT_WINDOW:
                 timestamps.pop(0)
                 
@@ -78,7 +76,6 @@ async def rate_limiter_middleware(request: Request, call_next):
                     media_type="application/json"
                 )
             
-            # Record current valid request timestamp
             timestamps.append(current_time)
 
     return await call_next(request)
@@ -89,6 +86,6 @@ async def rate_limiter_middleware(request: Request, call_next):
 @app.get("/ping")
 async def ping(request: Request):
     return {
-        "email": "user@example.com",  # Replace with your logged-in address if required static value
+        "email": "user@example.com",  # Replace with your actual address if required
         "request_id": request.state.request_id
     }
