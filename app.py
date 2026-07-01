@@ -8,23 +8,58 @@ from fastapi.responses import JSONResponse
 
 EMAIL = "24ds2000033@ds.study.iitm.ac.in"
 
-# Assigned values
 RATE_LIMIT = 11
 WINDOW = 10  # seconds
-
-# Allowed origins
-ALLOWED_ORIGINS = [
-    "https://app-y529sf.example.com",
-
-    # Exam page (keep this)
-    "https://exam.sanand.workers.dev",
-    "https://tools-in-data-science.pages.dev",
-]
 
 app = FastAPI()
 
 # -----------------------------
-# Middleware 1 - Request Context
+# CORS
+# -----------------------------
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://app-y529sf.example.com",
+
+        # Keep these for the exam checker
+        "https://exam.sanand.workers.dev",
+        "https://tools-in-data-science.pages.dev",
+    ],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# -----------------------------
+# Rate Limiter
+# -----------------------------
+client_requests = defaultdict(deque)
+
+
+@app.middleware("http")
+async def rate_limit(request: Request, call_next):
+    client_id = request.headers.get("X-Client-Id", "anonymous")
+
+    now = time.time()
+    q = client_requests[client_id]
+
+    while q and now - q[0] >= WINDOW:
+        q.popleft()
+
+    if len(q) >= RATE_LIMIT:
+        return JSONResponse(
+            status_code=429,
+            content={"detail": "Rate limit exceeded"},
+        )
+
+    q.append(now)
+
+    response = await call_next(request)
+    return response
+
+
+# -----------------------------
+# Request Context
 # -----------------------------
 @app.middleware("http")
 async def request_context(request: Request, call_next):
@@ -37,53 +72,14 @@ async def request_context(request: Request, call_next):
 
     response = await call_next(request)
 
+    # Echo request ID in response header
     response.headers["X-Request-ID"] = request_id
 
     return response
 
 
 # -----------------------------
-# Middleware 2 - Rate Limiter
-# -----------------------------
-client_requests = defaultdict(deque)
-
-
-@app.middleware("http")
-async def rate_limiter(request: Request, call_next):
-    client = request.headers.get("X-Client-Id", "anonymous")
-
-    now = time.time()
-
-    q = client_requests[client]
-
-    while q and now - q[0] > WINDOW:
-        q.popleft()
-
-    if len(q) >= RATE_LIMIT:
-        return JSONResponse(
-            status_code=429,
-            content={"detail": "Rate limit exceeded"},
-        )
-
-    q.append(now)
-
-    return await call_next(request)
-
-
-# -----------------------------
-# Middleware 3 - CORS
-# -----------------------------
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-
-# -----------------------------
-# Endpoint
+# Routes
 # -----------------------------
 @app.get("/ping")
 async def ping(request: Request):
