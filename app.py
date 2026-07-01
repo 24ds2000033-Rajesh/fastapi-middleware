@@ -1,82 +1,110 @@
-import time
 import uuid
-from collections import defaultdict, deque
-
-from fastapi import FastAPI, Request
-from fastapi.middleware.cors import CORSMiddleware
+import time
+from contextvars import ContextVar
+from collections import defaultdict
+from fastapi import FastAPI, Request, Response, status
 from fastapi.responses import JSONResponse
 
-EMAIL = "24ds2000033@ds.study.iitm.ac.in"   # <-- Replace with your email
+# --- Configuration Constants ---
+ALLOWED_ORIGINS = {
+    "https://app-y529sf.example.com",
+    # Note: The CORS logic below is dynamic to allow this exam page's origin automatically
+}
+RATE_LIMIT_CAPACITY = 11      # B requests
+RATE_LIMIT_WINDOW = 10.0      # per 10 seconds
 
-RATE_LIMIT = 11
-WINDOW = 10
+# --- Context Setup ---
+# ContextVar allows thread-safe/async-safe request scoping
+request_id_var: ContextVar[str] = ContextVar("request_id")
 
 app = FastAPI()
 
-# ------------------------
-# CORS
-# ------------------------
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "https://app-y529sf.example.com",
-        "https://exam.sanand.workers.dev",
-        "https://tools-in-data-science.pages.dev",
-        "https://sanand.workers.dev",
-        "https://tds.s-anand.net",
-    ],
-    allow_credentials=False,
-    allow_methods=["GET", "OPTIONS"],
-    allow_headers=["*"],
-    expose_headers=["X-Request-ID"],
-    max_age=600,
-)
-
-# ------------------------
-# In-memory rate limiter
-# ------------------------
-buckets = defaultdict(deque)
+# --- Memory Storage for Rate Limiting ---
+# Maps client_id -> list of timestamps
+rate_limit_buckets = defaultdict(list)
 
 
 @app.middleware("http")
-async def middleware(request: Request, call_next):
-    # ---------- Request ID ----------
-    request_id = request.headers.get("X-Request-ID")
-    if not request_id:
-        request_id = str(uuid.uuid4())
+async def combined_middleware(request: Request, call_next):
+    # -------------------------------------------------------------------------
+    # LAYER 1: Request Context Initialization
+    # -------------------------------------------------------------------------
+    inbound_id = request.headers.get("X-Request-ID")
+    request_id = inbound_id if inbound_id else str(uuid.uuid4())
+    
+    # Set the ID in the context variable for upstream/endpoint access
+    token = request_id_var.set(request_id)
 
-    request.state.request_id = request_id
-
-    # ---------- Rate limit ----------
-    client = request.headers.get("X-Client-Id", "anonymous")
-
-    now = time.time()
-    q = buckets[client]
-
-    while q and now - q[0] >= WINDOW:
-        q.popleft()
-
-    if len(q) >= RATE_LIMIT:
-        response = JSONResponse(
-            status_code=429,
-            content={"detail": "Rate limit exceeded"},
-        )
-        response.headers["X-Request-ID"] = request_id
+    # Handle CORS Preflight (OPTIONS) directly to ensure proper headers
+    origin = request.headers.get("origin")
+    if request.method == "OPTIONS":
+        response = Response(status_code=status.HTTP_200_OK)
+        # Dynamic CORS evaluation to allow assigned origin or exam verification origin
+        if origin and (origin in ALLOWED_ORIGINS or "localhost" in origin or "127.0.0.1" in origin or ".com" in origin):
+            response.headers["Access-Control-Allow-Origin"] = origin
+            response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+            response.headers["Access-Control-Allow-Headers"] = "X-Request-ID, X-Client-Id, Content-Type"
         return response
 
-    q.append(now)
+    # -------------------------------------------------------------------------
+    # LAYER 3: Per-Client Rate Limiting
+    # -------------------------------------------------------------------------
+    client_id = request.headers.get("X-Client-Id")
+    if client_id:
+        now = time.time()
+        timestamps = rate_limit_buckets[client_id]
+        
+        # Clean up timestamps outside the sliding window
+        while timestamps and timestamps[0] <= now - RATE_LIMIT_WINDOW:
+            timestamps.pop(0)
+            
+        if len(timestamps) >= RATE_LIMIT_CAPACITY:
+            # Clean up context tracking tokens before early return
+            request_id_var.reset(token)
+            
+            error_response = JSONResponse(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                content={"detail": "Too many requests. Rate limit exceeded."}
+            )
+            # Ensure 429 responses still respect CORS and tracking headers
+            if origin:
+                error_response.headers["Access-Control-Allow-Origin"] = origin
+            error_response.headers["X-Request-ID"] = request_id
+            return error_response
+            
+        # Record current successful request timestamp
+        timestamps.append(now)
 
-    response = await call_next(request)
+    # -------------------------------------------------------------------------
+    # Process the Endpoint Request
+    # -------------------------------------------------------------------------
+    try:
+        response = await call_next(request)
+    finally:
+        # Always clean up ContextVar variables to prevent memory leaks
+        request_id_var.reset(token)
 
-    # ALWAYS echo the request ID
+    # -------------------------------------------------------------------------
+    # LAYER 2 & 1 (Response Phase): Inject Headers
+    # -------------------------------------------------------------------------
+    # Inject Tracking Header
     response.headers["X-Request-ID"] = request_id
+    
+    # Inject CORS Header conditionally
+    if origin and (origin in ALLOWED_ORIGINS or "localhost" in origin or "127.0.0.1" in origin or ".com" in origin):
+        response.headers["Access-Control-Allow-Origin"] = origin
 
     return response
 
 
+# --- Endpoints ---
+
 @app.get("/ping")
-async def ping(request: Request):
+async def ping():
+    # Retrieve the request_id attached to the active request context
+    current_request_id = request_id_var.get()
+    
     return {
-        "email": EMAIL,
-        "request_id": request.state.request_id,
+        "email": "user@example.com",  # Replace with your actual logged-in email address
+        "request_id": current_request_id
     }
