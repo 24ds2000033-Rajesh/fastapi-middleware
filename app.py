@@ -23,9 +23,10 @@ app.add_middleware(
         "https://exam.sanand.workers.dev",
         "https://tools-in-data-science.pages.dev",
     ],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["X-Request-ID"],   # IMPORTANT
+    expose_headers=["X-Request-ID"],
 )
 
 # ------------------------
